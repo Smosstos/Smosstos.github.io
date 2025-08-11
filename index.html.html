@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Salem 1692 — Game Coach</title>
+<style>
+  :root{
+    --bg:#121212; --muted:#999; --card:#1e1e1e; --accent:#00ff99;
+    --red:#ff3b3b; --blue:#33ccff; --green:#00ff99;
+  }
+  body{
+    margin:0; font-family:Inter, "Segoe UI", Roboto, Arial; background:var(--bg); color:#f4f4f4;
+    padding:20px; display:flex; justify-content:center;
+  }
+  .app{ width:100%; max-width:900px; }
+  h1{ margin:0 0 12px; font-size:28px; text-align:center; }
+  .card{ background:var(--card); padding:16px; border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,0.6); }
+  .row{ display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  input[type="text"]{ padding:10px 12px; border-radius:8px; border:1px solid #333; background:#0f0f0f; color:#fff; min-width:220px; }
+  button{ cursor:pointer; border:0; padding:10px 14px; border-radius:8px; background:#444; color:#fff; }
+  button:disabled{ opacity:0.5; cursor:not-allowed; }
+  ul{ padding-left:18px; margin:8px 0 0 0; }
+  li{ margin:6px 0; }
+  .player-row{ display:flex; gap:8px; align-items:center; }
+  .small-btn{ padding:6px 8px; font-size:13px; border-radius:6px; background:#5a5a5a; }
+  #game-controls{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  #log{ margin-top:12px; text-align:center; min-height:48px; }
+
+  /* player selection buttons (used in many phases) */
+  .player-button{ display:inline-block; margin:6px; padding:10px 16px; border-radius:8px; background:#555; color:#fff; border:0; cursor:pointer; transition:box-shadow .18s, transform .08s; }
+  .player-button:hover{ transform:translateY(-2px); }
+  .a-witch{ box-shadow:0 0 18px 6px rgba(255,60,60,0.14); background:#ba0900; } /* red aura */
+  .a-constable{ box-shadow:0 0 18px 6px rgba(0,255,153,0.12); background:#00ff00; } /* green */
+  .a-sin{ box-shadow:0 0 18px 6px rgba(51,204,255,0.12); background:#33ddff; } /* blue */
+  .a-blackcat{ box-shadow:0 0 18px 6px rgba(255,60,60,0.18); background:#ba0900; } /* blackcat = red */
+  .disabled-btn{ opacity:0.45; cursor:not-allowed; transform:none; }
+
+  .result{ font-size:16px; margin-top:10px; }
+  .dead-name{ color:var(--red); font-weight:700; }
+
+  .note{ color:var(--muted); font-size:13px; margin-top:6px; }
+</style>
+</head>
+<body>
+  <div class="app">
+    <h1>Salem 1692 — Game Coach</h1>
+
+    <!-- Setup card -->
+    <div id="setupCard" class="card">
+      <div class="row">
+        <input id="playerName" type="text" placeholder="ชื่อผู้เล่น (พิมพ์แล้วกด เพิ่ม)" />
+        <button id="addBtn">➕ เพิ่ม</button>
+        <button id="startBtn" disabled>▶️ เริ่มเกม</button>
+      </div>
+
+      <div>
+        <strong>รายชื่อผู้เล่น:</strong>
+        <ul id="playerList"></ul>
+      </div>
+      <div class="note">ต้องมีผู้เล่นอย่างน้อย 4 คนถึงจะเริ่มเกมได้</div>
+    </div>
+
+    <br/>
+
+    <!-- Game card -->
+    <div id="gameCard" class="card" style="display:none;">
+      <div id="game-controls" class="row">
+        <button id="nightBtn">🌙 เริ่มรอบกลางคืน</button>
+        <button id="dayBtn">☀️ เริ่มรอบกลางวัน</button>
+        <button id="resetBtn">🔁 เริ่มใหม่</button>
+      </div>
+
+      <div id="log"></div>
+      <div id="extra" class="note"></div>
+    </div>
+  </div>
+
+<script>
+/* -------------------------
+   Helper (safe id for DOM)
+   ------------------------- */
+function idFor(name){
+  return 'id_' + encodeURIComponent(name).replace(/[%]/g,'_');
+}
+
+/* -------------------------
+   State
+   ------------------------- */
+let players = [];            // all players (current game)
+let activePlayers = [];      // players still alive (updated after deaths)
+let eliminatedPlayers = new Set(); // names eliminated this game
+let blackCatTarget = null;   // first-night black cat
+let isFirstNight = true;
+let witchTarget = null;
+let constableProtect = null;
+let sinners = new Set();
+
+/* -------------------------
+   DOM refs
+   ------------------------- */
+const playerNameInput = document.getElementById('playerName');
+const addBtn = document.getElementById('addBtn');
+const startBtn = document.getElementById('startBtn');
+const playerListEl = document.getElementById('playerList');
+
+const setupCard = document.getElementById('setupCard');
+const gameCard = document.getElementById('gameCard');
+const nightBtn = document.getElementById('nightBtn');
+const dayBtn = document.getElementById('dayBtn');
+const resetBtn = document.getElementById('resetBtn');
+
+const logEl = document.getElementById('log');
+const extraEl = document.getElementById('extra');
+
+/* -------------------------
+   Render helpers
+   ------------------------- */
+function renderPlayerList(){
+  playerListEl.innerHTML = '';
+  players.forEach(name => {
+    const li = document.createElement('li');
+    li.className = 'player-row';
+    // name label
+    const span = document.createElement('span');
+    span.textContent = name;
+    if (eliminatedPlayers.has(name)){
+      span.style.textDecoration = 'line-through';
+      span.style.opacity = '0.6';
+    }
+    // remove button
+    const rem = document.createElement('button');
+    rem.className = 'small-btn';
+    rem.textContent = 'ลบ';
+    rem.onclick = () => {
+      players = players.filter(p => p !== name);
+      renderPlayerList();
+      startBtn.disabled = players.length < 4;
+    };
+    li.appendChild(span);
+    li.appendChild(rem);
+    playerListEl.appendChild(li);
+  });
+}
+
+/* -------------------------
+   Player management
+   ------------------------- */
+addBtn.addEventListener('click', () => {
+  const name = playerNameInput.value.trim();
+  if (!name) return;
+  // prevent duplicate names
+  if (players.includes(name)){
+    alert('ชื่อนี้ถูกเพิ่มแล้ว'); playerNameInput.value=''; return;
+  }
+  players.push(name);
+  renderPlayerList();
+  playerNameInput.value = '';
+  startBtn.disabled = players.length < 4;
+});
+
+playerNameInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') addBtn.click();
+});
+
+/* -------------------------
+   Start / Reset
+   ------------------------- */
+startBtn.addEventListener('click', () => {
+  if (players.length < 4) return;
+  // prepare active players (exclude eliminated if any — but eliminated only after rounds)
+  activePlayers = players.filter(p => !eliminatedPlayers.has(p));
+  // show game UI
+  setupCard.style.display = 'none';
+  gameCard.style.display = 'block';
+  logEl.innerHTML = `<div class="note">ผู้เล่น: ${players.join(', ')}</div><div class="note">เตรียมเริ่มเกม — เริ่มคืนแรก</div>`;
+  extraEl.textContent = '';
+  // ensure first-night flow
+  isFirstNight = true;
+  blackCatTarget = null;
+  witchTarget = null;
+  constableProtect = null;
+  sinners.clear();
+});
+
+resetBtn.addEventListener('click', () => {
+  // รีเซ็ตสถานะเกมเท่านั้น ไม่ลบรายชื่อผู้เล่น
+  activePlayers = [];
+  eliminatedPlayers.clear();
+  blackCatTarget = null;
+  isFirstNight = true;
+  witchTarget = null;
+  constableProtect = null;
+  sinners.clear();
+
+  // UI
+  renderPlayerList();
+  setupCard.style.display = 'block';
+  gameCard.style.display = 'none';
+  logEl.innerHTML = '';
+  extraEl.textContent = '';
+  startBtn.disabled = players.length < 4;
+});
+
+/* -------------------------
+   Night: entry point
+   ------------------------- */
+nightBtn.addEventListener('click', () => {
+  // if no active players, nothing to do
+  if (players.length === 0){
+    alert('ยังไม่มีผู้เล่น กรุณาเพิ่มผู้เล่นก่อน');
+    return;
+  }
+  // refresh activePlayers excluding eliminated
+  activePlayers = players.filter(p => !eliminatedPlayers.has(p));
+  if (activePlayers.length === 0){
+    logEl.innerHTML = '<div class="result">ไม่มีผู้เล่นที่ยังเล่นได้</div>';
+    return;
+  }
+
+  // If first night: black cat selection first
+  if (isFirstNight){
+    renderBlackCatSelection();
+    return;
+  }
+  // else go straight to witch selection
+  renderWitchSelection();
+});
+
+/* -------------------------
+   Black cat (first night)
+   ------------------------- */
+function renderBlackCatSelection(){
+  logEl.innerHTML = '';
+  extraEl.textContent = 'คืนแรก: เลือกผู้รับแมวดำก่อนเริ่มกลางคืน';
+
+  const title = document.createElement('div');
+  title.innerHTML = '<strong>🐈‍⬛ เลือกผู้เล่นที่จะได้รับแมวดำ (เฉพาะคืนแรก)</strong>';
+  logEl.appendChild(title);
+
+  const wrap = document.createElement('div');
+  activePlayers.forEach(name => {
+    const btn = document.createElement('button');
+    btn.className = 'player-button';
+    btn.textContent = name;
+    btn.id = idFor('cat-'+name);
+    btn.onclick = () => selectBlackCat(name);
+    wrap.appendChild(btn);
+  });
+  logEl.appendChild(wrap);
+
+  const choice = document.createElement('div');
+  choice.id = 'blackCatChoice';
+  choice.style.marginTop = '10px';
+  logEl.appendChild(choice);
+
+  const done = document.createElement('div');
+  done.style.marginTop = '12px';
+  const doneBtn = document.createElement('button');
+  doneBtn.textContent = '✅ เสร็จสิ้นการเลือกแมวดำ';
+  doneBtn.onclick = confirmBlackCatChoice;
+  done.appendChild(doneBtn);
+  logEl.appendChild(done);
+}
+
+function selectBlackCat(name){
+  blackCatTarget = name;
+  // visual: clear previous, set selected class
+  activePlayers.forEach(p => {
+    const b = document.getElementById(idFor('cat-'+p));
+    if (b) b.classList.remove('a-blackcat','selected-blackcat');
+  });
+  const sel = document.getElementById(idFor('cat-'+name));
+  if (sel){
+    sel.classList.add('a-blackcat','selected-blackcat');
+  }
+  const ch = document.getElementById('blackCatChoice');
+  if (ch) ch.innerHTML = `🐈‍⬛ แมวดำอยู่กับ <strong>${name}</strong>`;
+}
+
+function confirmBlackCatChoice(){
+  if (!blackCatTarget){
+    alert('กรุณาเลือกแมวดำก่อนกดเสร็จสิ้น');
+    return;
+  }
+logEl.innerHTML = `
+  <div style="font-size:2em;font-weight:bold;margin-bottom:18px;">
+    🐈‍⬛ แมวดำถูกมอบให้: <span style="color:#ba0900">${blackCatTarget}</span>
+  </div>
+  <div class="result">
+    ✅ คืนแรกเสร็จสิ้น!<br>☀️ เข้าสู่กลางวันแล้ว
+  </div>
+`;
+isFirstNight = false;
+}
+
+/* -------------------------
+   Witch selection (night)
+   ------------------------- */
+function renderWitchSelection(){
+  witchTarget = null;
+  constableProtect = null;
+  sinners.clear();
+  extraEl.textContent = 'แม่มดเลือกเป้าหมายที่จะฆ่า (ลับ ๆ)';
+  logEl.innerHTML = '';
+  const title = document.createElement('div');
+  title.innerHTML = '<strong>🌙 แม่มด: เลือกผู้ที่จะฆ่า</strong>';
+  logEl.appendChild(title);
+
+  const wrap = document.createElement('div');
+  activePlayers.forEach(name => {
+    const btn = document.createElement('button');
+    btn.className = 'player-button';
+    btn.textContent = name;
+    btn.id = idFor('witch-'+name);
+    btn.onclick = () => selectWitchTarget(name);
+    wrap.appendChild(btn);
+  });
+  logEl.appendChild(wrap);
+
+  const done = document.createElement('div');
+  done.style.marginTop = '12px';
+  const doneBtn = document.createElement('button');
+  doneBtn.textContent = '✅ เสร็จสิ้นการเลือกของแม่มด';
+  doneBtn.onclick = () => {
+    if (!witchTarget){ alert('โปรดเลือกเป้าหมายของแม่มดก่อน'); return; }
+    renderConstableSelection();
+  };
+  done.appendChild(doneBtn);
+  logEl.appendChild(done);
+}
+
+function selectWitchTarget(name){
+  witchTarget = name;
+  // visual: remove other red classes, add to selected
+  activePlayers.forEach(p=>{
+    const b = document.getElementById(idFor('witch-'+p));
+    if (b) b.classList.remove('a-witch');
+  });
+  const sel = document.getElementById(idFor('witch-'+name));
+  if (sel) sel.classList.add('a-witch');
+}
+
+/* -------------------------
+   Constable selection (night)
+   ------------------------- */
+function renderConstableSelection(){
+  constableProtect = null;
+  extraEl.textContent = 'Constable เลือกผู้ที่ต้องการปกป้อง (ลับ ๆ)';
+  logEl.innerHTML = '';
+  const title = document.createElement('div');
+  title.innerHTML = '<strong>🛡️ Constable: เลือกผู้ที่ต้องการปกป้อง</strong>';
+  logEl.appendChild(title);
+
+  const wrap = document.createElement('div');
+  activePlayers.forEach(name=>{
+    const btn = document.createElement('button');
+    btn.className = 'player-button';
+    btn.textContent = name;
+    btn.id = idFor('const-'+name);
+    btn.onclick = () => selectConstableProtect(name);
+    wrap.appendChild(btn);
+  });
+  logEl.appendChild(wrap);
+
+  const done = document.createElement('div');
+  done.style.marginTop = '12px';
+  const doneBtn = document.createElement('button');
+  doneBtn.textContent = '✅ เสร็จสิ้นการเลือกของ Constable';
+  doneBtn.onclick = () => {
+    if (!constableProtect){ alert('โปรดเลือกผู้ถูกปกป้องก่อน'); return; }
+    // proceed to day phase UI
+    showNightResultThenDay();
+  };
+  done.appendChild(doneBtn);
+  logEl.appendChild(done);
+}
+
+function selectConstableProtect(name){
+  constableProtect = name;
+  activePlayers.forEach(p=>{
+    const b = document.getElementById(idFor('const-'+p));
+    if (b) b.classList.remove('a-constable');
+  });
+  const sel = document.getElementById(idFor('const-'+name));
+  if (sel) sel.classList.add('a-constable');
+}
+
+/* -------------------------
+   Resolve night & show day phase (sins)
+   ------------------------- */
+function showNightResultThenDay(){
+  // ไม่ต้องแสดงผลกลางคืน ให้ข้ามไปเริ่มรอบกลางวันเลย
+  startDayPhase();
+}
+
+function startDayPhase(){
+  // Prepare activePlayers list (exclude eliminated so far)
+  activePlayers = players.filter(p => !eliminatedPlayers.has(p));
+  // BUT note: we do not add witchTarget to eliminatedPlayers until confirm day result per spec
+  // Show sin selection UI; constable-protected person should appear green and not be selectable
+  logEl.innerHTML = '<div><strong>☀️ รอบกลางวัน — สภาพบาป</strong></div>';
+  extraEl.textContent = 'คลิกชื่อเพื่อเลือก/ยกเลิกว่าผู้เล่นคนนั้นอยู่ในสภาพบาป (ผู้ถูกปกป้องจะเป็นสีเขียวและไม่สามารถเลือกได้)';
+
+  const wrap = document.createElement('div');
+  activePlayers.forEach(name=>{
+    const btn = document.createElement('button');
+    btn.className = 'player-button';
+    btn.textContent = name;
+    btn.id = idFor('sin-'+name);
+    // if this name is the constableProtect, make it visually protected and disabled
+    if (name === constableProtect){
+      btn.classList.add('a-constable','disabled-btn');
+      btn.disabled = true;
+    } else {
+      btn.onclick = () => toggleSin(name);
+    }
+    wrap.appendChild(btn);
+  });
+  logEl.appendChild(wrap);
+
+  const done = document.createElement('div');
+  done.style.marginTop = '12px';
+  const doneBtn = document.createElement('button');
+  doneBtn.textContent = '✅ เสร็จสิ้นการโหวตสภาพบาป';
+  doneBtn.onclick = confirmDayPhase;
+  done.appendChild(doneBtn);
+  logEl.appendChild(done);
+}
+
+/* -------------------------
+   Sins (toggle)
+   ------------------------- */
+function toggleSin(name){
+  const btn = document.getElementById(idFor('sin-'+name));
+  if (!btn) return;
+  if (sinners.has(name)){
+    sinners.delete(name);
+    btn.classList.remove('a-sin');
+  } else {
+    sinners.add(name);
+    btn.classList.add('a-sin');
+  }
+}
+
+/* -------------------------
+   Confirm day: decide death, update states
+   ------------------------- */
+function confirmDayPhase(){
+  // Decide: if witchTarget exists and is not protected -> that person dies.
+  let resultHTML = '<div class="result"><strong>📜 ผลสรุปกลางวัน</strong><br/>';
+  if (!witchTarget || witchTarget === constableProtect){
+    resultHTML += 'ไม่มีใครตายในคืนก่อนหน้า<br/>';
+  } else {
+    // kill witchTarget: add to eliminatedPlayers and remove from activePlayers
+    eliminatedPlayers.add(witchTarget);
+    activePlayers = activePlayers.filter(p => p !== witchTarget);
+    resultHTML += `ผู้เสียชีวิตเมื่อคืน: <span class="dead-name">${witchTarget}</span><br/>`;
+  }
+  if (sinners.size > 0){
+    resultHTML += `<br>สภาพบาป: ${[...sinners].join(', ')}<br/>`;
+  } else {
+    resultHTML += `<br>สภาพบาป: -<br/>`;
+  }
+  resultHTML += '</div>';
+  logEl.innerHTML = resultHTML;
+  extraEl.textContent = '';
+
+  // clear per-night state to prepare next round
+  witchTarget = null;
+  constableProtect = null;
+  sinners.clear();
+  // next night is no longer first night
+  isFirstNight = false;
+}
+
+/* -------------------------
+   Utility: render witch/constable selection if needed
+   (used by direct Night start when not first night)
+   ------------------------- */
+function renderWitchSelectionQuick(){
+  // ensure activePlayers updated
+  activePlayers = players.filter(p => !eliminatedPlayers.has(p));
+  renderWitchSelection();
+}
+
+/* -------------------------
+   Bind dayBtn (manual) - user can jump to day if wanted
+   ------------------------- */
+dayBtn.addEventListener('click', () => {
+  // require that at least witch selection done — but allow jumping: we will just go to day UI
+  startDayPhase();
+});
+
+/* -------------------------
+   Safety: initial render
+   ------------------------- */
+renderPlayerList();
+
+</script>
+</body>
+</html>
